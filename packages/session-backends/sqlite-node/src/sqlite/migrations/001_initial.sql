@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS records (
 CREATE INDEX IF NOT EXISTS idx_records_session_seq ON records(session_id, seq);
 CREATE INDEX IF NOT EXISTS idx_records_session_lane_type_seq ON records(session_id, lane, type, seq);
 CREATE INDEX IF NOT EXISTS idx_records_session_lane_type_op_kind_seq ON records(session_id, lane, type, op_kind, seq);
+CREATE INDEX IF NOT EXISTS idx_records_session_lane_run_id_type ON records(session_id, lane, run_id, type);
 CREATE INDEX IF NOT EXISTS idx_records_session_run_id_seq ON records(session_id, run_id, seq);
 
 CREATE TABLE IF NOT EXISTS lane_moves (
@@ -116,7 +117,7 @@ CREATE TABLE IF NOT EXISTS branch_tips (
 
 -- Per-session writer claim. The fence prevents an expired owner from writing
 -- after a new owner takes over the session.
-CREATE TABLE IF NOT EXISTS leases (
+CREATE TABLE IF NOT EXISTS writer_leases (
 	session_id TEXT PRIMARY KEY,
 	owner_id TEXT NOT NULL,
 	fence INTEGER NOT NULL,
