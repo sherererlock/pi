@@ -2,15 +2,18 @@
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-08-06
+
 ### Breaking Changes
 
 - Replaced the legacy harness session model with the v4 lane-based `Session`, `SessionStorage`, and `SessionRepo` APIs, including durable operation records, global facts, shared sequence numbers, and tree-scoped lane views.
 - Promoted the v2 session and `AgentHarness` API from the experimental entrypoint to the default package export and removed the experimental subpaths.
 - Removed the legacy JSONL and in-memory repository APIs. Use the v4 `JsonlSessionRepo` or `InMemorySessionRepo`, both implementing the new `SessionRepo` contract.
+- Added the required `FileSystem.renameFile()` operation to harness execution environments for atomic JSONL publication; custom file-system implementations must provide same-filesystem replacement semantics ([#7707](https://github.com/earendil-works/pi/pull/7707) by [@davidbrai](https://github.com/davidbrai)).
 
 ### Added
 
-- Added typed AI-request and harness telemetry schemas, callback helpers, and a generated schema reference.
+- Added typed AI-request and harness telemetry schemas, their combined schema tuple, callback helpers, and a generated schema reference.
 - Added bounded `Session.findEntriesOnBranch()` and `findEntryOnBranch()` queries with explicit traversal, filtering, ordering, and limit options.
 - Added a compile-complete `AgentHarness` v2 scaffold; unfinished operation paths reject with `HarnessNotImplemented` while durable execution is implemented.
 - Added `JsonlSessionRepo`, a v4 append-only JSONL session repository with metadata validation and shared storage semantics ([#7611](https://github.com/earendil-works/pi/pull/7611) by [@davidbrai](https://github.com/davidbrai)).
@@ -21,6 +24,8 @@
 ### Fixed
 
 - Fixed Windows path handling for `NodeExecutionEnv` file basenames, recursive skill loading, and prompt template names.
+- Fixed `JsonlSessionRepo` enforcing session IDs globally across working directories; IDs are now unique within each working directory.
+- Fixed JSONL session forks and torn-tail repairs to publish atomically, avoiding partially written or corrupted sessions after interrupted writes ([#7707](https://github.com/earendil-works/pi/pull/7707) by [@davidbrai](https://github.com/davidbrai)).
 
 ## [0.83.0] - 2026-07-29
 

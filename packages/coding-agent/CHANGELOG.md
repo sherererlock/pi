@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.84.0] - 2026-08-06
+
 ### New Features
 
 - **Fullscreen TUI mode** — Switch between regular and fullscreen modes at runtime, with a sticky editor and footer, independently scrollable transcript, and draggable scrollbars. See [UI & Display](docs/settings.md#ui--display).
@@ -82,6 +84,8 @@
 - Replaced the inherited pi-agent-core harness session model with the v4 lane-based `Session`, `SessionStorage`, and `SessionRepo` APIs, including durable operation records, global facts, shared sequence numbers, and tree-scoped lane views.
 - Promoted the inherited v2 session and `AgentHarness` API from pi-agent-core's experimental entrypoint to its default export and removed the experimental subpaths.
 - Removed the inherited legacy JSONL and in-memory repository APIs. Use pi-agent-core's v4 `JsonlSessionRepo` or `InMemorySessionRepo`, both implementing the new `SessionRepo` contract.
+- Added the inherited required pi-agent-core `FileSystem.renameFile()` operation for atomic JSONL publication; custom harness file-system implementations must provide same-filesystem replacement semantics ([#7707](https://github.com/earendil-works/pi/pull/7707) by [@davidbrai](https://github.com/davidbrai)).
+- Replaced experimental remote-session list summaries with durable `SessionMetadata`; `RemoteSession.sessions` no longer exposes runtime phase, model, thinking, attachment, or lock state, which remains available from acquired `SessionSnapshot` values ([#7708](https://github.com/earendil-works/pi/pull/7708)).
 
 ### Added
 
@@ -105,7 +109,7 @@
 - Added inherited opt-in vLLM `thinking_token_budget` support for OpenAI-compatible models, reserving output tokens for the final answer ([#7638](https://github.com/earendil-works/pi/pull/7638) by [@bnsd55](https://github.com/bnsd55)).
 - Added inherited support for OpenAI-compatible streams that omit `finish_reason`, using `compat.supportsFinishReason` to infer normal and tool-use stops when the stream ends. See [OpenAI Compatibility](docs/models.md#openai-compatibility).
 - Added inherited deferred provider request contracts, durable response handles, authenticated fetch/cancel dispatch, and faux-provider support for pending, ready, failed, and cancelled responses ([#7339](https://github.com/earendil-works/pi/pull/7339) by [@davidbrai](https://github.com/davidbrai)).
-- Added inherited typed telemetry contracts, callback helpers, and schema references for pi-ai and the agent harness. See the [pi-ai telemetry schema](../ai/docs/telemetry-schema.md) and [agent harness telemetry schema](../agent/docs/telemetry-schema.md).
+- Added inherited vendor-neutral telemetry contracts plus agent-owned typed AI-request and harness schemas, composed span starters, and callback helpers. See the [agent telemetry schema reference](../agent/docs/telemetry-schema.md).
 - Added inherited structured Amazon Bedrock failure diagnostics with HTTP status, modeled error code, and AWS request id when available ([#7286](https://github.com/earendil-works/pi/pull/7286) by [@brianstanley](https://github.com/brianstanley)).
 - Added inherited `AgentOptions.shouldStopAfterTurn` for gracefully stopping after a completed turn before queued messages or another model call are processed. See [Agent Options](../agent/README.md#agent-options) ([#7367](https://github.com/earendil-works/pi/pull/7367) by [@acmerfight](https://github.com/acmerfight)).
 - Added inherited v4 `JsonlSessionRepo` support for append-only JSONL harness sessions ([#7611](https://github.com/earendil-works/pi/pull/7611) by [@davidbrai](https://github.com/davidbrai)).
@@ -119,6 +123,12 @@
 
 ### Fixed
 
+- Fixed the footer showing `(sub)` for generic OAuth/OpenID sign-ins without a known subscription; extension OAuth providers can opt in with `isSubscription`.
+- Fixed inherited OAuth token refreshes so stalled requests release the credential-store lock ([#7508](https://github.com/earendil-works/pi/issues/7508)).
+- Fixed inherited tool argument validation to preserve values that already match an `anyOf`/`oneOf` union arm before coercion, avoiding nullable unions converting `null` to another primitive value ([#7328](https://github.com/earendil-works/pi/issues/7328)).
+- Fixed inherited Fireworks GLM 5.2 requests sending the unsupported `prompt_cache_retention` field when long cache retention is enabled, and enabled session affinity for automatic prompt caching ([#7676](https://github.com/earendil-works/pi/issues/7676)).
+- Fixed inherited `JsonlSessionRepo` enforcing session IDs globally across working directories; IDs are now unique within each working directory.
+- Fixed inherited JSONL session forks and torn-tail repairs to publish atomically, avoiding partially written or corrupted sessions after interrupted writes ([#7707](https://github.com/earendil-works/pi/pull/7707) by [@davidbrai](https://github.com/davidbrai)).
 - Fixed path-containing `find` globs returning no results on Windows ([#6817](https://github.com/earendil-works/pi/issues/6817)).
 - Fixed messages queued during manual `/compact` failing instead of being sent after compaction completes.
 - Fixed Git Bash, MSYS, Cygwin, and WSL drive paths passed to built-in file tools resolving against the current Windows drive instead of their native drive ([#7064](https://github.com/earendil-works/pi/issues/7064), [#7547](https://github.com/earendil-works/pi/issues/7547)).

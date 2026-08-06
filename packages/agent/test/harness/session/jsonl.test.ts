@@ -1,9 +1,19 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { dirname, join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { NodeExecutionEnv } from "../../../src/harness/env/nodejs.ts";
-import { JsonlSessionRepo, type SessionRepo } from "../../../src/harness/session/index.ts";
+import { type JsonlSessionMetadata, JsonlSessionRepo, type SessionRepo } from "../../../src/harness/session/index.ts";
 import {
 	createSessionBackendConformance,
 	type SessionBackendFixture,
@@ -45,6 +55,21 @@ function expectedSessionPath(root: string, cwd: string, createdAt: number, id: s
 	const directory = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 	const timestamp = new Date(createdAt).toISOString().replace(/[:.]/g, "-");
 	return join(root, directory, `${timestamp}_${id}.jsonl`);
+}
+
+function writeRawSession(root: string, id: string, mutations: Record<string, unknown>[]): JsonlSessionMetadata {
+	const path = join(root, `${id}.jsonl`);
+	const createdAt = 1;
+	const header = { kind: "header", version: 4, id, createdAt, cwd: root };
+	writeFileSync(path, `${[header, ...mutations].map((line) => JSON.stringify(line)).join("\n")}\n`);
+	return {
+		id,
+		createdAt,
+		cwd: root,
+		path,
+		modifiedAt: statSync(path).mtimeMs,
+		sourceFormat: 4,
+	};
 }
 
 afterEach(() => {
@@ -106,27 +131,18 @@ describe("JSONL v4 persistence", () => {
 		});
 	});
 
-	it("does not scan existing sessions for generated ids", async () => {
+	it("allows the same explicit session id in different working directories", async () => {
 		const root = createTempDir();
-		const env = new NodeExecutionEnv({ cwd: root });
-		let listCalls = 0;
-		const countingFs = new Proxy(env, {
-			get(target, property) {
-				if (property === "listDir") {
-					return (path: string, abortSignal?: AbortSignal) => {
-						listCalls++;
-						return target.listDir(path, abortSignal);
-					};
-				}
-				const value: unknown = Reflect.get(target, property, target);
-				return typeof value === "function" ? value.bind(target) : value;
-			},
-		});
-		const repository = new JsonlSessionRepo({ fs: countingFs, sessionsRoot: root });
+		const repository = createRepository(root);
+		const firstCwd = join(root, "workspaces", "first");
+		const secondCwd = join(root, "workspaces", "second");
 
-		await repository.create({ cwd: root });
+		const first = await repository.create({ id: "shared", cwd: firstCwd });
+		const second = await repository.create({ id: "shared", cwd: secondCwd });
 
-		expect(listCalls).toBe(0);
+		expect((await first.getMetadata()).cwd).toBe(firstCwd);
+		expect((await second.getMetadata()).cwd).toBe(secondCwd);
+		expect((await repository.list()).map((metadata) => metadata.id)).toEqual(["shared", "shared"]);
 	});
 
 	it("sorts listed sessions by current filesystem modification time", async () => {
@@ -268,6 +284,50 @@ describe("JSONL v4 persistence", () => {
 		expect(await reopened.findRecords()).toEqual([]);
 	});
 
+	it("does not publish a partial fork when staging fails", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const repository = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
+		const source = await repository.create({ id: "source", cwd: root });
+		await source.appendMessage({ role: "user", content: [{ type: "text", text: "one" }], timestamp: 1 });
+		await source.appendMessage({ role: "user", content: [{ type: "text", text: "two" }], timestamp: 2 });
+		const sourceMetadata = await source.getMetadata();
+		const appendFile = env.appendFile.bind(env);
+		vi.spyOn(env, "appendFile")
+			.mockImplementationOnce(appendFile)
+			.mockResolvedValueOnce({
+				ok: false,
+				error: new FileError("unknown", "injected staging failure"),
+			});
+
+		await expect(repository.fork(sourceMetadata, { id: "fork", cwd: root })).rejects.toMatchObject({
+			code: "storage",
+		});
+
+		expect((await repository.list()).map((metadata) => metadata.id)).toEqual(["source"]);
+		expect(readdirSync(dirname(sourceMetadata.path)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+
+	it("does not publish a fork when atomic rename fails", async () => {
+		const root = createTempDir();
+		const env = new NodeExecutionEnv({ cwd: root });
+		const repository = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
+		const source = await repository.create({ id: "source", cwd: root });
+		await source.appendMessage({ role: "user", content: [{ type: "text", text: "one" }], timestamp: 1 });
+		const sourceMetadata = await source.getMetadata();
+		vi.spyOn(env, "renameFile").mockResolvedValueOnce({
+			ok: false,
+			error: new FileError("unknown", "injected rename failure"),
+		});
+
+		await expect(repository.fork(sourceMetadata, { id: "fork", cwd: root })).rejects.toMatchObject({
+			code: "storage",
+		});
+
+		expect((await repository.list()).map((metadata) => metadata.id)).toEqual(["source"]);
+		expect(readdirSync(dirname(sourceMetadata.path)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+	});
+
 	it("repairs a valid final line missing its newline", async () => {
 		const root = createTempDir();
 		const repository = createRepository(root);
@@ -299,21 +359,12 @@ describe("JSONL v4 persistence", () => {
 		writeFileSync(metadata.path, readFileSync(metadata.path, "utf8").trimEnd());
 
 		const env = new NodeExecutionEnv({ cwd: root });
-		const failingFs = new Proxy(env, {
-			get(target, property) {
-				if (property === "appendFile") {
-					return () =>
-						Promise.resolve({
-							ok: false as const,
-							error: new FileError("permission_denied", "repair denied", metadata.path),
-						});
-				}
-				const value: unknown = Reflect.get(target, property, target);
-				return typeof value === "function" ? value.bind(target) : value;
-			},
+		vi.spyOn(env, "appendFile").mockResolvedValueOnce({
+			ok: false,
+			error: new FileError("permission_denied", "repair denied", metadata.path),
 		});
 		const failingRepository = new JsonlSessionRepo({
-			fs: failingFs,
+			fs: env,
 			sessionsRoot: root,
 		});
 
@@ -354,6 +405,36 @@ describe("JSONL v4 persistence", () => {
 		const reopenedRepository = createRepository(root);
 		await expect(reopenedRepository.open(metadata)).rejects.toMatchObject({ code: "invalid_entry" });
 		expect(readFileSync(metadata.path, "utf8")).toBe(corrupted);
+	});
+
+	it("rejects an imported entry that references a missing parent", async () => {
+		const root = createTempDir();
+		const path = join(root, "session-missing-parent.jsonl");
+		const header = { kind: "header", version: 4, id: "missing-parent", createdAt: 1, cwd: root };
+		const entry = {
+			kind: "entry",
+			type: "custom",
+			id: "orphan",
+			customType: "note",
+			parentId: "missing",
+			seq: 1,
+			timestamp: 1,
+		};
+		writeFileSync(path, `${JSON.stringify(header)}\n${JSON.stringify(entry)}\n`);
+		const metadata = {
+			id: header.id,
+			createdAt: header.createdAt,
+			path,
+			cwd: root,
+			modifiedAt: statSync(path).mtimeMs,
+			sourceFormat: 4 as const,
+		};
+
+		const repository = createRepository(root);
+		await expect(repository.open(metadata)).rejects.toMatchObject({
+			code: "invalid_entry",
+			message: expect.stringContaining("references missing parent missing"),
+		});
 	});
 
 	it("rejects a lane-bound entry that does not chain to the lane leaf", async () => {
@@ -410,5 +491,151 @@ describe("JSONL v4 persistence", () => {
 		const movedRepository = createRepository(root);
 		const moved = await movedRepository.open(metadata);
 		expect(await moved.getLeafId()).toBe("imported");
+	});
+
+	it.each([
+		{
+			name: "a non-consecutive sequence",
+			message: "non-consecutive seq",
+			mutations: [
+				{ kind: "entry", type: "custom", id: "entry", customType: "note", parentId: null, seq: 2, timestamp: 1 },
+			],
+		},
+		{
+			name: "a duplicate entry/record id",
+			message: "duplicate id",
+			mutations: [
+				{
+					kind: "entry",
+					type: "custom",
+					id: "duplicate",
+					customType: "note",
+					parentId: null,
+					seq: 1,
+					timestamp: 1,
+				},
+				{
+					kind: "record",
+					type: "operation_started",
+					id: "duplicate",
+					lane: "main",
+					seq: 2,
+					timestamp: 2,
+					sourceLeafId: null,
+					intent: { kind: "run", originalPrompt: [], initialMessages: [] },
+				},
+			],
+		},
+		{
+			name: "an entry with a missing parent",
+			message: "missing parent",
+			mutations: [
+				{
+					kind: "entry",
+					type: "custom",
+					id: "entry",
+					customType: "note",
+					parentId: "missing",
+					seq: 1,
+					timestamp: 1,
+				},
+			],
+		},
+		{
+			name: "an entry referencing a missing lane",
+			message: "missing lane",
+			mutations: [
+				{
+					kind: "entry",
+					lane: "thread",
+					type: "custom",
+					id: "entry",
+					customType: "note",
+					parentId: null,
+					seq: 1,
+					timestamp: 1,
+				},
+			],
+		},
+		{
+			name: "a record referencing a missing lane",
+			message: "missing lane",
+			mutations: [
+				{
+					kind: "record",
+					type: "operation_started",
+					id: "run",
+					lane: "thread",
+					seq: 1,
+					timestamp: 1,
+					sourceLeafId: null,
+					intent: { kind: "run", originalPrompt: [], initialMessages: [] },
+				},
+			],
+		},
+		{
+			name: "a lane move referencing a missing entry",
+			message: "missing lane target",
+			mutations: [{ kind: "lane", lane: "thread", leafId: "missing", seq: 1 }],
+		},
+		{
+			name: "a label referencing a missing entry",
+			message: "missing label target",
+			mutations: [{ kind: "fact", fact: "label", targetId: "missing", label: "checkpoint", seq: 1 }],
+		},
+	])("rejects $name during replay", async ({ name, message, mutations }) => {
+		const root = createTempDir();
+		const metadata = writeRawSession(root, name.replace(/[^A-Za-z0-9._-]/g, "-"), mutations);
+
+		await expect(createRepository(root).open(metadata)).rejects.toMatchObject({
+			code: "invalid_entry",
+			message: expect.stringContaining(message),
+		});
+	});
+
+	it("rejects a complete malformed interior mutation without modifying the file", async () => {
+		const root = createTempDir();
+		const metadata = writeRawSession(root, "malformed-interior", [
+			{
+				kind: "record",
+				type: "operation_started",
+				id: "run",
+				lane: "main",
+				seq: 1,
+				timestamp: 1,
+				sourceLeafId: null,
+			},
+			{ kind: "fact", fact: "name", name: "after", seq: 2 },
+		]);
+		const corrupted = readFileSync(metadata.path, "utf8");
+
+		await expect(createRepository(root).open(metadata)).rejects.toMatchObject({ code: "invalid_entry" });
+		expect(readFileSync(metadata.path, "utf8")).toBe(corrupted);
+	});
+
+	it("preserves the session when staging torn-tail repair fails", async () => {
+		const root = createTempDir();
+		const repository = createRepository(root);
+		const session = await repository.create({ id: "repair-failure", cwd: root });
+		const metadata = await session.getMetadata();
+		await session.appendCustomEntry("kept");
+		appendFileSync(metadata.path, '{"kind":"entry"');
+		const original = readFileSync(metadata.path, "utf8");
+
+		const env = new NodeExecutionEnv({ cwd: root });
+		const writeFile = env.writeFile.bind(env);
+		vi.spyOn(env, "writeFile").mockImplementationOnce(async (path: string) => {
+			const damaged = await writeFile(path, "");
+			if (!damaged.ok) return damaged;
+			return {
+				ok: false,
+				error: new FileError("unknown", "repair interrupted after truncation", path),
+			};
+		});
+		const failingRepository = new JsonlSessionRepo({ fs: env, sessionsRoot: root });
+
+		await expect(failingRepository.open(metadata)).rejects.toMatchObject({ code: "storage" });
+		expect(readFileSync(metadata.path, "utf8")).toBe(original);
+		expect(existsSync(`${metadata.path}.tmp`)).toBe(false);
 	});
 });

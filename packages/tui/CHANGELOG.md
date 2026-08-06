@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LaTeX relation, multiplication, and named-operator spacing, and correctly composed matrices with stacked fractions, operator limits, and adjacent matrices.
+
+## [0.84.0] - 2026-08-06
+
 ### Added
 
 - Added terminal-friendly Unicode rendering for LaTeX expressions in Markdown, including inline and display math, fractions, scripts, common symbols, aligned equations, cases, and matrices.
