@@ -1553,13 +1553,23 @@ class Session implements SessionTree {          // bound to "main"
 interface IdGenerator { next(): string; }
 
 interface RecordQuery {
+  /** Exact lane match. Omit to query every lane. */
   lane?: string;
+  /** Exact record discriminant match. Omit to query every record type. */
   type?: LaneRecord["type"];
+  /**
+   * Operation identity. Matches OperationStartedRecord.id and the runId
+   * property of operation-owned records. Records without an operation
+   * identity do not match.
+   */
   runId?: string;
-  /** Valid only with type "operation_started". */
+  /** Exact operation intent kind. Valid only with type "operation_started". */
   operationKind?: OperationStartedRecord["intent"]["kind"];
+  /** Exclusive chronological lower bound: seq > afterSeq, regardless of order. */
   afterSeq?: number;
+  /** Sequence order. Default: "newestFirst". */
   order?: "oldestFirst" | "newestFirst";
+  /** Positive maximum number of matching records. */
   limit?: number;
 }
 ```
@@ -1650,7 +1660,7 @@ interface JsonlSessionListOptions { cwd?: string; }
 
 A v3 `parentSession` path resolves to the parent header's id when that file is available. If it is unavailable, metadata retains `legacyParentSessionPath`; first-write conversion preserves that optional header field rather than silently dropping the relationship. Format-4 code uses `parentSessionId` for repository relationships. `modifiedAt` is read from the filesystem and is not a sequenced session mutation.
 
-The repository layout matches coding-agent v3. Under `sessionsRoot`, each resolved cwd uses a directory named `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`. New files are named `${createdAtIso.replace(/[:.]/g, "-")}_${sessionId}.jsonl`. `list({ cwd })` scans that cwd's directory; `list()` scans every direct child directory. First-write v3 conversion replaces the original file in place and never changes its directory or filename.
+The repository layout matches coding-agent v3. Under `sessionsRoot`, each resolved cwd uses a directory named `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`. New files are named `${createdAtIso.replace(/[:.]/g, "-")}_${sessionId}.jsonl`. `list({ cwd })` scans that cwd's directory; `list()` scans every direct child directory. Listing reads only each file's header and filesystem metadata; it does not open or replay the session. A file with a missing or malformed header is omitted from the result. First-write v3 conversion replaces the original file in place and never changes its directory or filename.
 
 One file per session: a header line, then one JSON object per line, in `seq` order. Every logical mutation is exactly one line; a line is the atomic unit.
 
@@ -2229,7 +2239,10 @@ async function driverLoop(): Promise<RunResult> {
     for (const w of [...op.pendingWrites])            await fx.applyPendingWrite(op.id, w.id);
     for (const m of steeringForThisCheckpoint(op))    await fx.consumeQueueItem(op.id, "steer", m.id);
     if (op.aborting) return await abortPath();
-    if (await contextOverLimit()) await autoCompact(pressureReason());   // may throw RunFailed
+    if (await contextOverLimit()) {
+      await autoCompact(pressureReason());                  // may throw RunFailed
+      continue;                                             // fresh checkpoint: input may have arrived during compaction
+    }
 
     if (needsAssistant()) {
       const outcome = await runTurn();
@@ -3203,9 +3216,9 @@ Implementation packages derive their tests from this design and do not use the p
 
 - [x] **QA2 — salvage storage and query tests.** Dependencies: QA1, R0.
   - Port worthwhile bounded-query, corruption, fork, immutable-read, lane, record-query, and recovery-query cases whose replacement APIs already exist. Skip deleted implementation details and behavior already covered by backend conformance.
-  - Acceptance: each reviewed storage/query case is covered by a cited current test, ported as a comprehensive invariant test, marked inapplicable, or left blocked on J1–J5.
+  - Acceptance: each reviewed storage/query case is covered by a cited current test, ported as a comprehensive invariant test, marked inapplicable, or left blocked on J1–J6.
 
-- [ ] **QA3 — salvage remaining legacy tests.** Dependencies: QA2, J5, O2.
+- [ ] **QA3 — salvage remaining legacy tests.** Dependencies: QA2, J6, O2.
   - After the new storage and harness runtime are complete, review every matrix case still blocked or uncovered. Port only still-valid invariants against the new public APIs; do not restore deleted APIs or old implementation details. QA3 may change focused tests and the matrix, but no production code.
   - Acceptance: every matrix row ends covered by a cited current test, ported by a comprehensive new test, or explicitly inapplicable; no row remains blocked or uncovered.
 
@@ -3230,8 +3243,6 @@ These packages merge R0 → R1 → R2 → R3. R1 and R2 add a reducer module ins
   - Keep `LaneState` limited to orchestration state. Reduction exclusively owns all three outputs; later recovery packages consume `LaneReductionResult` and do not re-reduce tool or operation records.
   - Acceptance: table-driven tests cover idle and every suspended state, configuration fallback/override, and terminal-failure provenance; reduction is deterministic and performs no writes.
 
-**Reserved: R3 by @vegarsti.**
-
 - [ ] **R3 — harness restore inventory.** Dependencies: F0, R2.
   - Primary files: `packages/agent/src/harness/agent-harness.ts`, reducer integration helpers, and restore tests.
   - Wire `AgentHarness.create()` to use indexed open-operation discovery, bounded idle/open scans, explicit provisioned-id point lookups, and bounded configuration lookups. Return accurate `SuspendedOperation[]` without starting effects.
@@ -3239,9 +3250,9 @@ These packages merge R0 → R1 → R2 → R3. R1 and R2 add a reducer module ins
 
 ### Track J — JSONL storage
 
-**In progress and reserved: @davidbrai.** The work began before this plan was split into J0–J5. Before merge, the track owner must include or rebase onto R0's recovery-query contract and report which J packages are complete. Other agents must not pick a J package while this ownership marker remains.
+**In progress and reserved: @davidbrai.** The work began before this plan was split into J0–J6. Before merge, the track owner must include or rebase onto R0's recovery-query contract and report which J packages are complete. Other agents must not pick a J package while this ownership marker remains.
 
-These packages own `packages/agent/src/harness/session/jsonl/**`, the concrete `JsonlSessionRepo` export, and `packages/agent/test/harness/session/jsonl*.test.ts`. They merge J0 → J1 → J2 → J3 → J4 → J5 and may proceed in parallel with tracks L and I after R0.
+These packages own `packages/agent/src/harness/session/jsonl/**`, the concrete `JsonlSessionRepo` export, and `packages/agent/test/harness/session/jsonl*.test.ts`. They merge J0 → J1 → J2 → J3 → J4 → J5 → J6 and may proceed in parallel with tracks L and I after R0.
 
 - [x] **J0 — JSONL metadata and codec contracts.** Dependencies: R0.
   - Primary files: JSONL type/codec modules and focused codec tests; no public repository export yet.
@@ -3254,7 +3265,7 @@ These packages own `packages/agent/src/harness/session/jsonl/**`, the concrete `
 - [x] **J2 — format-4 repository lifecycle and forks.** Dependencies: J1.
   - Add create/open/list/delete, one writer queue per session, metadata ordering/filtering, branch/tree forks, and the concrete public `JsonlSessionRepo` export.
   - Acceptance: the complete backend-neutral conformance suite passes against JSONL, including concurrent lane writes and forks.
-- [ ] **J3 — format-4 crash and corruption behavior.** Dependencies: J2.
+- [x] **J3 — format-4 crash and corruption behavior.** Dependencies: J2.
   - Add torn-tail truncation, malformed-interior rejection, missing-reference rejection, and lifecycle/concurrency edge cases.
   - Acceptance: acknowledged writes survive reopen and malformed non-tail data is never silently repaired.
 - [ ] **J4 — read-only v3 normalization.** Dependencies: J3.
@@ -3264,6 +3275,10 @@ These packages own `packages/agent/src/harness/session/jsonl/**`, the concrete `
 - [ ] **J5 — first-write v3 conversion.** Dependencies: J4.
   - Rewrite through a temporary format-4 file on the first mutation, preserve metadata/facts/tree and resolved or legacy parent linkage, and add the aggregate v3 usage adjustment.
   - Acceptance: crash-safe conversion tests cover failure before rename, successful reopen, statistics preservation, unresolved legacy parent paths, and no second conversion.
+
+- [ ] **J6 — schema-based durable payload validation.** Dependencies: J5.
+  - Define shared TypeBox schemas for format-4 JSON and derive session types from them, including runtime schema registration for application-defined `AgentMessage` variants.
+  - Acceptance: malformed durable payloads are rejected consistently and JSONL decoding uses the shared schemas.
 
 ### Track I — primitives
 
@@ -3281,6 +3296,9 @@ I0, I1, and I2 may proceed independently. I3 → I4 → I5 is serial and begins 
   - Primary files: `packages/agent/src/harness/hooks.ts`, `packages/agent/test/harness/hooks.test.ts`.
   - Implement typed registration, stable-id validation, ordered aggregation, error isolation, fail-closed `before_tool`, and per-id resume data handling.
   - Acceptance: focused tests cover every section 11 aggregation and failure rule; no operation wiring yet.
+
+**Reserved: I2 by @vegarsti.**
+
 - [ ] **I2 — passive events and watch buffering.** Dependencies: none.
   - Primary files: `packages/agent/src/harness/events.ts`, `packages/agent/test/harness/events.test.ts`.
   - Implement passive listener isolation and the snapshot/start/unsubscribe buffer primitive used by lane and session watchers.
@@ -3367,7 +3385,7 @@ These packages also own `agent-harness.ts` and merge after H8, in order C1 → C
 
 ### Track O — observability and core completion
 
-These packages merge O1 → O2 → O3 → O4 after N1, with QA3 between O2 and O3. QA3 also requires J5. They may not modify `packages/coding-agent/**`.
+These packages merge O1 → O2 → O3 → O4 after N1, with QA3 between O2 and O3. QA3 also requires J6. They may not modify `packages/coding-agent/**`.
 
 - [ ] **O1 — snapshots and event completeness.** Dependencies: N1, I2.
   - Finish live lane/session snapshots, event filtering, streaming/running-tool state, and all section 10 event insertion points.
@@ -3378,15 +3396,15 @@ These packages merge O1 → O2 → O3 → O4 after N1, with QA3 between O2 and O
 - [ ] **O3 — action-prefix and race audit.** Dependencies: O2, QA3.
   - Complete Tier C for every race row, mechanically reopen every action prefix, compare automatic/manual logs, and verify reducer/live-state fixed points.
   - Acceptance: every race row has both orders and no documented crash action lacks a reopen test.
-- [ ] **O4 — backend parity and final core audit.** Dependencies: J5, O3.
+- [ ] **O4 — backend parity and final core audit.** Dependencies: J6, O3.
   - Run the complete storage/recovery matrix across memory, JSONL, and SQLite; remove dead agent/storage declarations and compatibility comments; verify exports/declarations and `./node`; update changelogs and core documentation.
   - Acceptance: all non-e2e tests and `npm run check` pass, no active harness operation remains scaffolded, `packages/coding-agent/**` is unchanged, and the worktree is clean.
 
 ### Dependency, priority, and merge summary
 
-The serial storage lane is **R0 → J0 → J1 → J2 → J3 → J4 → J5**. The reducer lane is **R0 → R1 → R2 → R3**. The loop lane is **I0 → L1 → L2 → L3**. The effects lane is **R2 → I3 → I4 → I5**, with I4 also requiring I0, I1, and L3. Before H0, the convergence gate is **F0 + R3 + I2 + I5**.
+The serial storage lane is **R0 → J0 → J1 → J2 → J3 → J4 → J5 → J6**. The reducer lane is **R0 → R1 → R2 → R3**. The loop lane is **I0 → L1 → L2 → L3**. The effects lane is **R2 → I3 → I4 → I5**, with I4 also requiring I0, I1, and L3. Before H0, the convergence gate is **F0 + R3 + I2 + I5**.
 
-The runtime merge lane is strictly **H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8 → C1 → C2 → C3 → N1 → O1 → O2 → QA3 → O3 → O4**. J5 may land independently at any time before QA3. This ordering prevents concurrent rewrites of `agent-harness.ts`, assigns every public method, and ensures every live path lands only after its reducer, telemetry, interception, and effect boundaries exist.
+The runtime merge lane is strictly **H0 → H1 → H2 → H3 → H4 → H5 → H6 → H7 → H8 → C1 → C2 → C3 → N1 → O1 → O2 → QA3 → O3 → O4**. J6 may land independently at any time before QA3. This ordering prevents concurrent rewrites of `agent-harness.ts`, assigns every public method, and ensures every live path lands only after its reducer, telemetry, interception, and effect boundaries exist.
 
 ## 21. Required reading
 
