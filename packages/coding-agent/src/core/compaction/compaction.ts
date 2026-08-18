@@ -26,6 +26,17 @@ import {
 	serializeConversation,
 } from "./utils.ts";
 
+function getAnthropicSummarizationFallback(model: Model<any>): readonly { model: string }[] | undefined {
+	if (model.provider !== "anthropic" || model.api !== "anthropic-messages") {
+		return undefined;
+	}
+
+	const allowedFallbackModels = (model as Model<"anthropic-messages">).compat?.allowedFallbackModels;
+	// Use the primary permitted fallback for now. If future Anthropic models expose
+	// broader fallback behavior, this can become a user/config pick or a full chain.
+	return allowedFallbackModels && allowedFallbackModels.length > 0 ? [{ model: allowedFallbackModels[0] }] : undefined;
+}
+
 // ============================================================================
 // File Operation Tracking
 // ============================================================================
@@ -544,8 +555,13 @@ function createSummarizationOptions(
 	env: Record<string, string> | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
+	sessionId: string | undefined,
 ): SimpleStreamOptions {
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env };
+	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env, sessionId };
+	const refusalFallbacks = getAnthropicSummarizationFallback(model);
+	if (refusalFallbacks) {
+		options.refusalFallbacks = refusalFallbacks;
+	}
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -567,11 +583,12 @@ export async function completeSummarization(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 ): Promise<AssistantMessage> {
-	// Summaries are standalone requests, so isolate routing and avoid cache writes that cannot be reused.
+	// Avoid cache writes for one-off summaries. Reuse caller-supplied routing when available;
+	// callers without a session ID, including branch summaries, receive a fresh routing ID.
 	const requestOptions: SimpleStreamOptions = {
 		...options,
 		cacheRetention: "none",
-		sessionId: uuidv7(),
+		sessionId: options.sessionId ?? uuidv7(),
 	};
 	const produce = async (): Promise<AssistantMessage> =>
 		streamFn
@@ -598,6 +615,7 @@ export async function generateSummary(
 	env?: Record<string, string>,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	sessionId?: string,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -614,6 +632,7 @@ export async function generateSummary(
 			env,
 			retry,
 			callbacks,
+			sessionId,
 		)
 	).text;
 }
@@ -633,6 +652,7 @@ export async function generateSummaryWithUsage(
 	env?: Record<string, string>,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	sessionId?: string,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -665,7 +685,16 @@ export async function generateSummaryWithUsage(
 		},
 	];
 
-	const completionOptions = createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel);
+	const completionOptions = createSummarizationOptions(
+		model,
+		maxTokens,
+		apiKey,
+		headers,
+		env,
+		signal,
+		thinkingLevel,
+		sessionId,
+	);
 
 	const response = await completeSummarization(
 		model,
@@ -813,6 +842,7 @@ Be concise. Focus on what's needed to understand the kept suffix.`;
  *
  * @param preparation - Pre-calculated preparation from prepareCompaction()
  * @param customInstructions - Optional custom focus for the summary
+ * @param sessionId - Optional routing session ID forwarded without enabling prompt caching
  */
 export async function compact(
 	preparation: CompactionPreparation,
@@ -826,6 +856,7 @@ export async function compact(
 	env?: Record<string, string>,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	sessionId?: string,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -860,6 +891,7 @@ export async function compact(
 				env,
 				retry,
 				callbacks,
+				sessionId,
 			);
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
@@ -876,6 +908,7 @@ export async function compact(
 			streamFn,
 			retry,
 			callbacks,
+			sessionId,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -896,6 +929,7 @@ export async function compact(
 			env,
 			retry,
 			callbacks,
+			sessionId,
 		);
 		summary = result.text;
 		summaryUsage = result.usage;
@@ -933,6 +967,7 @@ async function generateTurnPrefixSummary(
 	streamFn?: StreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	sessionId?: string,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -952,7 +987,7 @@ async function generateTurnPrefixSummary(
 	const response = await completeSummarization(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel),
+		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel, sessionId),
 		streamFn,
 		retry,
 		callbacks,
